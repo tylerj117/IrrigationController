@@ -1,0 +1,358 @@
+#include <PubSubClient.h>
+#include <ESP8266WiFi.h>
+#include <SPI.h>
+#include <ArduinoJson.h>
+#include <WiFiManager.h>
+
+/******************************************************************
+ * Enable and Disable Options
+   * To enable, uncomment line
+   * To disable, comment line out */
+   
+#define OTA_enabled //default: enabled
+#define HTTPUpdateServer_enabled //default: enabled
+#define mqttDiscovery_enabled //default: enabled
+//#define DynamicJSON_enabled //default: DISabled
+//#define ForgetKnownNetworks_enabled //default: enabled // Uncomment to reset WiFi settings & delete known networks
+
+/******************************************************************/
+
+//Software Version
+#define SOFTWARE_ID "0.1.3.2";
+
+/* v0.1.1 Release Requirement Goals:
+  * [ ] GOAL: (blank)
+*/
+
+/* Version Notes
+  * v0.1.0 * (blank)
+
+*/
+
+/******************************************************************/
+
+String MODEL_ID = "ESP8266";
+String MANUFACTURER_ID = "SummitSystems";
+String MQTT_COMPONENT = "switch";
+String DEVICE_CLASS = "IrrigationController";
+
+/******************************************************************/
+
+#ifdef OTA_enabled
+#include <ArduinoOTA.h>
+#endif
+
+#ifdef HTTPUpdateServer_enabled
+#include <ESP8266WebServer.h>
+#include <ESP8266mDNS.h>
+#include <ESP8266HTTPUpdateServer.h>
+ESP8266WebServer httpServer(80);
+#endif
+
+#ifdef DynamicJSON_enabled
+DynamicJsonDocument pl_config(1024);
+#else
+StaticJsonDocument<1024> pl_config;
+#endif
+
+WiFiClient espClient;
+
+//Set MQTT server
+PubSubClient client(espClient);
+int mqtt_port;
+IPAddress mqtt_server;
+
+//Set Strings
+String MAC = String(WiFi.macAddress());
+String mqtt_clientID = MAC;
+//char * MAC = (char*)WiFi.macAddress().c_str();
+//char * mqtt_clientID = MAC;
+
+//Set MQTT topics
+String mqtt_prefix = "home/" + MQTT_COMPONENT + "/" + MAC;
+String mqtt_avty_t = mqtt_prefix + "/status";
+
+/**********************************************************
+**********************************************************/
+
+void setup_wifi() {
+  Serial.print("Attempting to connect to WiFi...");
+  
+  WiFi.mode(WIFI_STA); 
+  WiFiManager wifiManager; //only requires local initialization
+  
+  wifiManager.setCountry("US");
+  //wifiManager.setDarkMode(true);
+  wifiManager.setClass("invert");
+  
+  //This resets WiFi settings (wipe saved credentials). Uncomment '#define ForgetKnownNetworks_enabled' to enable
+  #ifdef ForgetKnownNetworks_enabled
+  wifiManager.resetSettings();
+  #endif
+  
+  //define custom Captive Portal Parameters
+  WiFiManagerParameter specified_mqtt_server("server", "MQTT Host IP (ex. xxx.xxx.x.xx)", "192.168.1.32", 20, "pattern='\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}'");
+  //WiFiManagerParameter specified_mqtt_port("port", "MQTT Port", "1883", 6);
+  WiFiManagerParameter test_ip_param("test_param", "Test IP param", "", 15, "pattern='\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}'"); // custom input attrs (ip mask)
+  
+  //add custom Captive Portal Parameters  
+  wifiManager.addParameter(&specified_mqtt_server);
+  //wifiManager.addParameter(&specified_mqtt_port);
+  wifiManager.addParameter(&test_ip_param);
+  
+   // Automatically connect using saved credentials,
+   // if connection fails, it starts an access point with the specified name ( "AutoConnectAP"),
+   // if empty will auto generate SSID, if password is blank it will be anonymous AP (wm.autoConnect())
+   // then goes into a blocking loop awaiting configuration and will return success result
+   
+   String AP_NAME = DEVICE_CLASS + " " + MQTT_COMPONENT + " (" + MAC.substring(12) + ")";
+   
+   bool res;
+   res = wifiManager.autoConnect((char*)AP_NAME.c_str()); //wifiManager.autoConnect("AP-Name","AP-password")
+  
+   if(!res) {
+     Serial.println("failed");
+   } else {
+     Serial.println("connected!");
+   }
+ 
+  mqtt_server.fromString(specified_mqtt_server.getValue());
+  mqtt_port = (int)specified_mqtt_port.getValue();
+}
+  
+/**********************************************************/
+
+void setup_httpUpdater() {
+
+  //declare variables
+  const char* host = "esp8266-webupdate";
+
+  //WebUpdater
+  ESP8266HTTPUpdateServer httpUpdater;
+
+  MDNS.begin(host);
+
+  httpUpdater.setup(&httpServer);
+  httpServer.begin();
+
+  MDNS.addService("http", "tcp", 80);
+  Serial.printf("HTTPUpdateServer ready! Open http://%s.local/update in your browser\n", host);
+
+}
+
+/**********************************************************/
+
+void setup_OTA() {
+  // Port defaults to 8266
+  // ArduinoOTA.setPort(8266);
+
+  // Hostname defaults to esp8266-[ChipID]
+  //otherwise, setHostname to MAC address
+  ArduinoOTA.setHostname((char*) MAC.c_str());
+
+  // No authentication by default
+  ArduinoOTA.setPassword("02117166");
+
+  // Password can be set with it's md5 value as well
+  // MD5(admin) = 21232f297a57a5a743894a0e4a801fc3
+  // ArduinoOTA.setPasswordHash("21232f297a57a5a743894a0e4a801fc3");
+
+  ArduinoOTA.onStart([]() {
+    String type;
+    if (ArduinoOTA.getCommand() == U_FLASH) {
+      type = "sketch";
+    } else { //U_FS
+      type = "filesystem";
+    }
+
+    // NOTE: if updating FS this would be the place to unmount FS using FS.end()
+
+    Serial.println("Begin updating " + type);
+  });
+  ArduinoOTA.onEnd([]() {
+    Serial.println("/lnEnd");
+  });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    Serial.printf("Progress: %u%%/r", (progress / (total / 100)));
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) {
+      Serial.println("Authorization Failed");
+    } else if (error ==  OTA_BEGIN_ERROR) {
+      Serial.println("Failed to Begin");
+    } else if (error == OTA_CONNECT_ERROR) {
+      Serial.println("Connection Failed");
+    } else if (error == OTA_RECEIVE_ERROR) {
+      Serial.println("Failed to Receive");
+    } else if (error == OTA_END_ERROR) {
+      Serial.println("Failed to End");
+    }
+  });
+  ArduinoOTA.begin();
+  Serial.println("Ready");
+  Serial.println();
+
+}
+
+/**********************************************************/
+
+void mqtt_reconnect() {
+
+  //declare variables
+  //IP Address of server running MQTT Broker (e.g. HomeAssistant)
+  //user and password must match a User created in HomeAssistant
+#define mqtt_user "mqtt"
+#define mqtt_password "mqtt"
+
+  //client.setServer(mqtt_server, mqtt_port);
+  client.setServer(mqtt_server, 1883);
+  
+  // Loop until we're reconnecteda
+  while (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+
+    // Attempt to connect
+    if (client.connect((char*)mqtt_clientID.c_str(), mqtt_user, mqtt_password, (char*)mqtt_avty_t.c_str(), 1, true, "offline")) {
+      Serial.println("connected");
+      client.setBufferSize(1024);
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      // Wait 5 seconds before retrying
+      delay(5000);
+    }
+  }
+}
+
+/**********************************************************/
+
+void mqttpub_dscvy(char* node) {
+
+  if (!client.connected()) {
+    mqtt_reconnect();
+  } else {
+    ;
+  }
+
+  String mqtt_dscvy_t = "homeassistant/" + MQTT_COMPONENT + "/" + MAC  + "/" + node + "/config";
+
+  Serial.println("");
+  Serial.print("Initiating MQTT discovery (-t ");
+  Serial.print(mqtt_dscvy_t + ")...");
+
+  pl_config.clear();
+
+  pl_config["uniq_id"] = MAC + "_" + String(node);
+  pl_config["~"] = mqtt_prefix;
+  pl_config["stat_t"] = "~/state";
+  pl_config["avty_t"] = "~/status";
+  pl_config["name"] = MAC.substring(12) + " " + DEVICE_CLASS + " (" + String(node) + ")";
+  pl_config["ic"] = "mdi:sprinkler";
+  pl_config["val_tpl"] = "{{ value_json." + String(node) + "}}";
+
+  mqtt_setDeviceConfig(mqtt_dscvy_t, node);
+}
+
+/**********************************************************/
+
+void mqtt_setDeviceConfig(String config_t, String node) {
+  JsonObject device = pl_config.createNestedObject("dev");
+
+  device["name"] = "Garden Sensor (" + MAC.substring(12) + ")";
+  device["sw"] = SOFTWARE_ID;
+  device["mdl"] = MODEL_ID;
+  device["mf"] = MANUFACTURER_ID;
+  JsonArray identifiers = pl_config["dev"].createNestedArray("ids");
+  identifiers.add(MAC);
+  JsonArray connections = device.createNestedArray("cns");
+  connections.add(serialized("[\"MAC\",\"" + WiFi.macAddress() + "\"]"));
+  //connections.add(serialized("[\"ip\",\"" + ipstr + "\"]"));
+
+  char buffer[1024];
+  serializeJsonPretty(pl_config, buffer);
+
+  if (client.publish((char *)config_t.c_str(), buffer, true) == true) {
+    Serial.println("...success");
+  } else {
+    Serial.println("...failed...");
+  }
+
+
+}
+/**********************************************************/
+void mqttpub_avty(char* pl_avail) {
+
+  Serial.println("");
+  Serial.print("Publishing ");
+  Serial.print(pl_avail);
+  Serial.print(" to ");
+  Serial.print(mqtt_avty_t);
+  Serial.print("...");
+
+  if (!client.connected()) {
+    mqtt_reconnect();
+  } else {
+    ;
+  }
+
+  if (client.publish((char*) mqtt_avty_t.c_str(), pl_avail, true) == true) {
+    Serial.println("...success");
+  } else {
+    Serial.println("...failed...");
+  }
+}
+
+/**********************************************************/
+
+void setup() {
+  Serial.begin(91024);
+
+  while (!Serial) {
+    ;
+  }
+
+  //MAC.replace(":", "-");
+  
+  setup_wifi();
+  mqtt_reconnect();
+
+#ifdef OTA_enabled
+  setup_OTA();
+#endif
+
+#ifdef HTTPUpdateServer_enabled
+  setup_httpUpdater();
+#endif
+
+#ifdef MQTTDiscovery_enabled
+  mqttpub_dscvy("zone1");
+  mqttpub_dscvy("zone2");
+  mqttpub_dscvy("zone3");
+  mqttpub_dscvy("zone4");
+  mqttpub_dscvy("zone5");
+  mqttpub_dscvy("zone6");
+  mqttpub_dscvy("zone7");
+  mqttpub_dscvy("zone8");
+#endif
+  
+  delay(500);
+  mqttpub_avty("online");
+
+}
+
+/**********************************************************/
+
+void loop() {
+
+  ArduinoOTA.handle();
+  httpServer.handleClient();
+  MDNS.update();
+
+  if (!client.connected()) {
+    mqtt_reconnect();
+  }
+  client.loop();
+
+}
