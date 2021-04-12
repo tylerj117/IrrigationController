@@ -5,54 +5,79 @@
 #include <WiFiManager.h>
 
 /******************************************************************
- * Enable and Disable Options
-   * To enable, uncomment line
-   * To disable, comment line out */
-   
-#define OTA_enabled //default: enabled
-#define HTTPUpdateServer_enabled //default: enabled
-#define mqttDiscovery_enabled //default: enabled
-//#define DynamicJSON_enabled //default: DISabled
-//#define ForgetKnownNetworks_enabled //default: enabled // Uncomment to reset WiFi settings & delete known networks
+   Enable and Disable Options
+     To enable, uncomment line
+     To disable, comment line out */
+
+#define OTA_enabled                    //default: enabled
+#define HTTPUpdateServer_enabled       //default: enabled
+#define mqttDiscovery_enabled          //default: enabled
+#define ShiftRegister_enabled          //default: enabled
+//#define DynamicJSON_enabled          //default: DISabled
+//#define ForgetKnownNetworks_enabled  //default: DISabled // Uncomment to reset WiFi settings & delete known networks
+
+#define numberOfZones 2                //default: 8        // used to determine what to send to MQTT Discovery
+#define numberofShiftRegisters 1       //default: 1        //
 
 /******************************************************************/
 
 //Software Version
-#define SOFTWARE_ID "0.1.3.2";
+#define SOFTWARE_ID "0.1.0";
 
 /* v0.1.1 Release Requirement Goals:
-  * [ ] GOAL: (blank)
+    [ ] GOAL: Make it work...
 */
 
 /* Version Notes
-  * v0.1.0 * (blank)
+    v0.1.0 * (blank)
 
 */
 
 /******************************************************************/
 
-String MODEL_ID = "ESP8266";
-String MANUFACTURER_ID = "SummitSystems";
-String MQTT_COMPONENT = "switch";
-String DEVICE_CLASS = "IrrigationController";
-
+String MODEL_ID = "ESP8266 - Irrigation Controller";   //
+String MANUFACTURER_ID = "SummitSystems";              //
+//String MQTT_COMPONENT = "switch";                    // moved to mqtt_dscvy parameter, global variable not required
+String DEVICE_CLASS = "IrrigationController";          // no spaces. underscores and hyphens allowed
+String SUGGESTED_AREA = "Garden";                      // "Living Room", "Entry", "Master", "Kitchen"
+                                                       
 /******************************************************************/
-
-#ifdef OTA_enabled
-#include <ArduinoOTA.h>
-#endif
-
-#ifdef HTTPUpdateServer_enabled
+                                                       
+#ifdef OTA_enabled                                     
+#include <ArduinoOTA.h>                   
+#endif                                                 
+                                                       
+#ifdef HTTPUpdateServer_enabled                        
 #include <ESP8266WebServer.h>
 #include <ESP8266mDNS.h>
 #include <ESP8266HTTPUpdateServer.h>
-ESP8266WebServer httpServer(80);
+ESP8266WebServer httpServer(80); 
 #endif
 
 #ifdef DynamicJSON_enabled
 DynamicJsonDocument pl_config(1024);
+DynamicJsonDocument pl_state(1024);
+DynamicJsonDocument doc(1024);
 #else
 StaticJsonDocument<1024> pl_config;
+StaticJsonDocument<1024> pl_state;
+StaticJsonDocument<1024> doc;
+#endif
+
+#ifdef ShiftRegister_enabled
+#include <ShiftRegister74HC595.h>
+int latchPin = 14;    //corresponding ESP8266 pin
+int clockPin = 4;     //corresponding ESP8266 pin
+int dataPin = 5;      //corresponding ESP8266 pin
+int sr_zone1 = 15;    //RELAY IN1 to sr pin15
+int sr_zone2 = 1;     //RELAY IN2 to sr pin1
+int sr_zone3 = 2;     //RELAY IN3 to sr pin2
+int sr_zone4 = 3;     //RELAY IN4 to sr pin3
+int sr_zone5 = 4;     //RELAY IN5 to sr pin4
+int sr_zone6 = 5;     //RELAY IN6 to sr pin5
+int sr_zone7 = 6;     //RELAY IN7 to sr pin6
+int sr_zone8 = 7;     //RELAY IN8 to sr pin7
+ShiftRegister74HC595<numberofShiftRegisters> shiftregister(dataPin, clockPin, latchPin);
 #endif
 
 WiFiClient espClient;
@@ -69,57 +94,70 @@ String mqtt_clientID = MAC;
 //char * mqtt_clientID = MAC;
 
 //Set MQTT topics
-String mqtt_prefix = "home/" + MQTT_COMPONENT + "/" + MAC;
+String mqtt_prefix = "home/" + DEVICE_CLASS + "/" + MAC;
+String mqtt_stat_t = mqtt_prefix + "/state";
 String mqtt_avty_t = mqtt_prefix + "/status";
+String mqtt_cmd_t = mqtt_prefix + "/set";
+
+bool zone1_state;
+bool zone2_state;
+bool zone3_state;
+bool zone4_state;
+bool zone5_state;
+bool zone6_state;
+bool zone7_state;
+bool zone8_state;
+
+char buffer[1024];
 
 /**********************************************************
 **********************************************************/
 
 void setup_wifi() {
   Serial.print("Attempting to connect to WiFi...");
-  
-  WiFi.mode(WIFI_STA); 
+
+  WiFi.mode(WIFI_STA);
   WiFiManager wifiManager; //only requires local initialization
-  
+
   wifiManager.setCountry("US");
   //wifiManager.setDarkMode(true);
   wifiManager.setClass("invert");
-  
+
   //This resets WiFi settings (wipe saved credentials). Uncomment '#define ForgetKnownNetworks_enabled' to enable
-  #ifdef ForgetKnownNetworks_enabled
+#ifdef ForgetKnownNetworks_enabled
   wifiManager.resetSettings();
-  #endif
-  
+#endif
+
   //define custom Captive Portal Parameters
   WiFiManagerParameter specified_mqtt_server("server", "MQTT Host IP (ex. xxx.xxx.x.xx)", "192.168.1.32", 20, "pattern='\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}'");
   //WiFiManagerParameter specified_mqtt_port("port", "MQTT Port", "1883", 6);
-  WiFiManagerParameter test_ip_param("test_param", "Test IP param", "", 15, "pattern='\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}'"); // custom input attrs (ip mask)
-  
-  //add custom Captive Portal Parameters  
+  //WiFiManagerParameter test_ip_param("test_param", "Test IP param", "", 15, "pattern='\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}'"); // custom input attrs (ip mask)
+
+  //add custom Captive Portal Parameters
   wifiManager.addParameter(&specified_mqtt_server);
   //wifiManager.addParameter(&specified_mqtt_port);
-  wifiManager.addParameter(&test_ip_param);
-  
-   // Automatically connect using saved credentials,
-   // if connection fails, it starts an access point with the specified name ( "AutoConnectAP"),
-   // if empty will auto generate SSID, if password is blank it will be anonymous AP (wm.autoConnect())
-   // then goes into a blocking loop awaiting configuration and will return success result
-   
-   String AP_NAME = DEVICE_CLASS + " " + MQTT_COMPONENT + " (" + MAC.substring(12) + ")";
-   
-   bool res;
-   res = wifiManager.autoConnect((char*)AP_NAME.c_str()); //wifiManager.autoConnect("AP-Name","AP-password")
-  
-   if(!res) {
-     Serial.println("failed");
-   } else {
-     Serial.println("connected!");
-   }
- 
-  mqtt_server.fromString(specified_mqtt_server.getValue());
-  mqtt_port = (int)specified_mqtt_port.getValue();
+  //wifiManager.addParameter(&test_ip_param);
+
+  // Automatically connect using saved credentials,
+  // if connection fails, it starts an access point with the specified name ( "AutoConnectAP"),
+  // if empty will auto generate SSID, if password is blank it will be anonymous AP (wm.autoConnect())
+  // then goes into a blocking loop awaiting configuration and will return success result
+
+  String AP_NAME = DEVICE_CLASS + " (" + MAC.substring(12) + ")";
+
+  bool res;
+  res = wifiManager.autoConnect((char*)AP_NAME.c_str()); //wifiManager.autoConnect("AP-Name","AP-password")
+
+  if (!res) {
+    Serial.println("failed");
+  } else {
+    Serial.println("connected!");
+  }
+
+  //mqtt_server.fromString(specified_mqtt_server.getValue());
+  //mqtt_port = (int)specified_mqtt_port.getValue();
 }
-  
+
 /**********************************************************/
 
 void setup_httpUpdater() {
@@ -206,11 +244,12 @@ void mqtt_reconnect() {
 #define mqtt_password "mqtt"
 
   //client.setServer(mqtt_server, mqtt_port);
-  client.setServer(mqtt_server, 1883);
-  
-  // Loop until we're reconnecteda
+  //client.setServer(mqtt_server, 1883);
+  client.setServer("192.168.1.32", 1883);
+
+  // Loop until we're reconnected
   while (!client.connected()) {
-    Serial.print("Attempting MQTT connection...");
+    Serial.print("Establishing MQTT connection...");
 
     // Attempt to connect
     if (client.connect((char*)mqtt_clientID.c_str(), mqtt_user, mqtt_password, (char*)mqtt_avty_t.c_str(), 1, true, "offline")) {
@@ -223,12 +262,14 @@ void mqtt_reconnect() {
       // Wait 5 seconds before retrying
       delay(5000);
     }
+
+    client.subscribe((char*)mqtt_cmd_t.c_str());
   }
 }
 
 /**********************************************************/
 
-void mqttpub_dscvy(char* node) {
+void mqttpub_dscvy(char* node, String MQTT_COMPONENT) {
 
   if (!client.connected()) {
     mqtt_reconnect();
@@ -237,20 +278,50 @@ void mqttpub_dscvy(char* node) {
   }
 
   String mqtt_dscvy_t = "homeassistant/" + MQTT_COMPONENT + "/" + MAC  + "/" + node + "/config";
+  mqtt_dscvy_t.replace(":", "-");
 
-  Serial.println("");
-  Serial.print("Initiating MQTT discovery (-t ");
+  Serial.print("mosquitto_pub MQTT Discovery for ");
+  Serial.print(node);
+  Serial.print(" - ");
+  Serial.print(MQTT_COMPONENT);
+  Serial.print(" (-t ");
   Serial.print(mqtt_dscvy_t + ")...");
 
   pl_config.clear();
 
-  pl_config["uniq_id"] = MAC + "_" + String(node);
+  pl_config["uniq_id"] = MAC + "_" + String(node) + "_" + MQTT_COMPONENT;
   pl_config["~"] = mqtt_prefix;
   pl_config["stat_t"] = "~/state";
   pl_config["avty_t"] = "~/status";
-  pl_config["name"] = MAC.substring(12) + " " + DEVICE_CLASS + " (" + String(node) + ")";
-  pl_config["ic"] = "mdi:sprinkler";
-  pl_config["val_tpl"] = "{{ value_json." + String(node) + "}}";
+  //pl_config["name"] = /*MAC.substring(12) + " " + */ DEVICE_CLASS + " (" + String(node) + ")";
+  //pl_config["val_tpl"] = "{{ value_json." + String(node) + " }}";
+  //pl_config["stat_off"] = false;
+  //pl_config["stat_on"] = true;
+  //pl_config["pl_off"] = 1;
+  //pl_config["pl_on"] = 0;
+  if (MQTT_COMPONENT == "binary_sensor") {
+    pl_config["ic"] = "mdi:toggle-switch";
+    pl_config["val_tpl"] = "{{ value_json." + String(node) + "_" + MQTT_COMPONENT + " }}";
+    pl_config["name"] = /*MAC.substring(12) + " " + */ DEVICE_CLASS + " (" + String(node) + "_" + MQTT_COMPONENT + ")";
+    pl_config["dev_cla"] = "connectivity";
+  } else if (MQTT_COMPONENT == "device_trigger") {
+    pl_config["ic"] = "mdi:toggle-switch";
+    pl_config["val_tpl"] = "{{ value_json." + String(node) + "_" + MQTT_COMPONENT + " }}";
+    pl_config["name"] = /*MAC.substring(12) + " " + */ DEVICE_CLASS + " (" + String(node) + "_" + MQTT_COMPONENT + ")";
+  } else if (MQTT_COMPONENT == "sensor") {
+    pl_config["ic"] = "mdi:leak";
+    pl_config["val_tpl"] = "{{ value_json." + String(node) + "_" + MQTT_COMPONENT + " }}";
+    pl_config["name"] = /*MAC.substring(12) + " " + */ DEVICE_CLASS + " (" + String(node) + "_" + MQTT_COMPONENT + ")";
+  } else if (MQTT_COMPONENT == "switch") {
+    pl_config["ic"] = "mdi:sprinkler";
+    pl_config["val_tpl"] = "{{ value_json." + String(node) + "_" + MQTT_COMPONENT + " }}";
+    pl_config["name"] = /*MAC.substring(12) + " " + */ DEVICE_CLASS + " (" + String(node) + "_" + MQTT_COMPONENT + ")";
+    pl_config["cmd_t"] = "~/set";
+    pl_config["stat_off"] = false;
+    pl_config["stat_on"] = true;
+    pl_config["pl_off"] = 1;
+    pl_config["pl_on"] = 0;
+  }
 
   mqtt_setDeviceConfig(mqtt_dscvy_t, node);
 }
@@ -260,17 +331,17 @@ void mqttpub_dscvy(char* node) {
 void mqtt_setDeviceConfig(String config_t, String node) {
   JsonObject device = pl_config.createNestedObject("dev");
 
-  device["name"] = "Garden Sensor (" + MAC.substring(12) + ")";
+  device["name"] = DEVICE_CLASS + " (" + MAC.substring(12) + ")";
   device["sw"] = SOFTWARE_ID;
   device["mdl"] = MODEL_ID;
   device["mf"] = MANUFACTURER_ID;
+  device["sa"] = SUGGESTED_AREA;
   JsonArray identifiers = pl_config["dev"].createNestedArray("ids");
   identifiers.add(MAC);
   JsonArray connections = device.createNestedArray("cns");
   connections.add(serialized("[\"MAC\",\"" + WiFi.macAddress() + "\"]"));
   //connections.add(serialized("[\"ip\",\"" + ipstr + "\"]"));
 
-  char buffer[1024];
   serializeJsonPretty(pl_config, buffer);
 
   if (client.publish((char *)config_t.c_str(), buffer, true) == true) {
@@ -284,18 +355,18 @@ void mqtt_setDeviceConfig(String config_t, String node) {
 /**********************************************************/
 void mqttpub_avty(char* pl_avail) {
 
-  Serial.println("");
-  Serial.print("Publishing ");
-  Serial.print(pl_avail);
-  Serial.print(" to ");
-  Serial.print(mqtt_avty_t);
-  Serial.print("...");
-
   if (!client.connected()) {
     mqtt_reconnect();
   } else {
     ;
   }
+
+  Serial.println("");
+  Serial.print("mosquitto_pub MQTT Availability (-m ");
+  Serial.print(pl_avail);
+  Serial.print(")");
+  Serial.print("\t");
+  Serial.print("(-m: " + mqtt_avty_t + ")...");
 
   if (client.publish((char*) mqtt_avty_t.c_str(), pl_avail, true) == true) {
     Serial.println("...success");
@@ -305,38 +376,288 @@ void mqttpub_avty(char* pl_avail) {
 }
 
 /**********************************************************/
+void callback(char* topic,  byte* json_payload, unsigned int length) {
+  Serial.print("Incoming Message [");
+  Serial.print(topic);
+  Serial.print("] ");
+  for (int i = 0; i < length; i++) {
+    Serial.print((char)json_payload[i]);
+  }
+  Serial.println();
+
+  // Allocate the correct amount of memory for the payload copy
+  byte* p = (byte*)malloc(length);
+  // Copy the payload to the new buffer
+  memcpy(p, json_payload, length);
+  client.publish("home/debug", p, length);
+  // Free the memory
+  //free(p);
+
+  //StaticJsonDocument<1024> doc;
+  doc.clear();
+  deserializeJson(doc, p, length);
+
+  bool zone1_state = doc["zone1"] | 0;
+  bool zone2_state = doc["zone2"] | 0;
+  bool zone3_state = doc["zone3"] | 0;
+  bool zone4_state = doc["zone4"] | 0;
+  bool zone5_state = doc["zone5"] | 0;
+  bool zone6_state = doc["zone6"] | 0;
+  bool zone7_state = doc["zone7"] | 0;
+  bool zone8_state = doc["zone8"] | 0;
+  doc.clear();
+
+  Serial.print("zone1: ");
+  Serial.print(zone1_state);
+  Serial.print("\t");
+  Serial.print("zone2: ");
+  Serial.print(zone2_state);
+  Serial.print("\t");
+  Serial.print("zone3: ");
+  Serial.print(zone3_state);
+  Serial.print("\t");
+  Serial.print("zone4: ");
+  Serial.print(zone4_state);
+  Serial.println();
+
+  Serial.print("zone5: ");
+  Serial.print(zone5_state);
+  Serial.print("\t");
+  Serial.print("zone6: ");
+  Serial.print(zone6_state);
+  Serial.print("\t");
+  Serial.print("zone7: ");
+  Serial.print(zone7_state);
+  Serial.print("\t");
+  Serial.print("zone8: ");
+  Serial.print(zone8_state);
+  Serial.println();
+
+  free(p);
+
+  update_shiftregister(zone1_state, zone2_state, zone3_state,
+                       zone4_state, zone5_state, zone6_state,
+                       zone7_state, zone8_state);
+  read_shiftregister();
+}
+/**********************************************************/
+void setup_shiftregister() {
+  pinMode(latchPin, OUTPUT);
+  pinMode(dataPin, OUTPUT);
+  pinMode(clockPin, OUTPUT);
+
+  Serial.print("Initiating Shift Register...");
+
+  shiftregister.setAllHigh(); //set all pins High; close all relays
+  Serial.println("all pins set HIGH");
+}
+/**********************************************************/
+void update_shiftregister(bool zone1, bool zone2, bool zone3, bool zone4,
+                          bool zone5, bool zone6, bool zone7, bool zone8) {
+
+  //zone1
+  Serial.print("zone1:");
+  Serial.print("\t");
+  switch (zone1) {
+    case true:
+      shiftregister.setNoUpdate(sr_zone1, LOW);
+      Serial.print("ON");
+      break;
+    default:
+      shiftregister.setNoUpdate(sr_zone1, HIGH);
+      Serial.print("OFF");
+      break;
+  }
+
+  //zone2
+  Serial.print("\t");
+  Serial.print("zone2:");
+  Serial.print("\t");
+  switch (zone2) {
+    case true:
+      shiftregister.setNoUpdate(sr_zone2, LOW);
+      Serial.print("ON");
+      break;
+    default:
+      shiftregister.setNoUpdate(sr_zone2, HIGH);
+      Serial.print("OFF");
+      break;
+  }
+
+  //zone3
+  Serial.print("\t");
+  Serial.print("zone3:");
+  Serial.print("\t");
+  switch (zone3) {
+    case true:
+      shiftregister.setNoUpdate(sr_zone3, LOW);
+      Serial.print("ON");
+      break;
+    default:
+      shiftregister.setNoUpdate(sr_zone3, HIGH);
+      Serial.print("OFF");
+      break;
+  }
+
+  //zone4
+  Serial.print("\t");
+  Serial.print("zone4:");
+  Serial.print("\t");
+  switch (zone4) {
+    case true:
+      shiftregister.setNoUpdate(sr_zone4, LOW);
+      Serial.print("ON");
+      break;
+    default:
+      shiftregister.setNoUpdate(sr_zone4, HIGH);
+      Serial.print("OFF");
+      break;
+  }
+
+  Serial.println();
+
+  //zone5
+  Serial.print("\t");
+  Serial.print("zone5:");
+  Serial.print("\t");
+  switch (zone5) {
+    case true:
+      shiftregister.setNoUpdate(sr_zone5, LOW);
+      Serial.print("ON");
+      break;
+    default:
+      shiftregister.setNoUpdate(sr_zone5, HIGH);
+      Serial.print("OFF");
+      break;
+  }
+
+  //zone6
+  Serial.print("\t");
+  Serial.print("zone6:");
+  Serial.print("\t");
+  switch (zone6) {
+    case true:
+      shiftregister.setNoUpdate(sr_zone6, LOW);
+      Serial.print("ON");
+      break;
+    default:
+      shiftregister.setNoUpdate(sr_zone6, HIGH);
+      Serial.print("OFF");
+      break;
+  }
+
+  //zone7
+  Serial.print("\t");
+  Serial.print("zone7:");
+  Serial.print("\t");
+  switch (zone7) {
+    case true:
+      shiftregister.setNoUpdate(sr_zone7, LOW);
+      Serial.print("ON");
+      break;
+    default:
+      shiftregister.setNoUpdate(sr_zone7, HIGH);
+      Serial.print("OFF");
+      break;
+  }
+
+  //zone8
+  Serial.print("\t");
+  Serial.print("zone8:");
+  Serial.print("\t");
+  switch (zone8) {
+    case true:
+      shiftregister.setNoUpdate(sr_zone8, LOW);
+      Serial.print("ON");
+      break;
+    default:
+      shiftregister.setNoUpdate(sr_zone8, HIGH);
+      Serial.print("OFF");
+      break;
+  }
+
+  shiftregister.updateRegisters();
+  Serial.println();
+  Serial.print("Registers Updated...");
+}
+/**********************************************************/
+void read_shiftregister() {
+
+  pl_state.clear();
+  pl_state["zone1"] = !shiftregister.get(sr_zone1);
+  pl_state["zone2"] = !shiftregister.get(sr_zone2);
+  pl_state["zone3"] = !shiftregister.get(sr_zone3);
+  pl_state["zone4"] = !shiftregister.get(sr_zone4);
+  pl_state["zone5"] = !shiftregister.get(sr_zone5);
+  pl_state["zone6"] = !shiftregister.get(sr_zone6);
+  pl_state["zone7"] = !shiftregister.get(sr_zone7);
+  pl_state["zone8"] = !shiftregister.get(sr_zone8);
+
+  serializeJsonPretty(pl_state, buffer);
+
+  Serial.print("mosquitto_pub Publish states");
+  Serial.print("\t");
+  //Serial.println("(-t " + mqtt_stat_t + ")");
+  Serial.println("(-t home/debug)");
+  Serial.print("-m ");
+  Serial.print("\t");
+  Serial.println(buffer);
+
+  if (client.publish((char *)mqtt_stat_t.c_str(), buffer, true) == true) {
+    Serial.println("...success!");
+  } else {
+    Serial.println("...failed...");
+  }
+
+  pl_state.clear();
+
+}
+
+/**********************************************************/
 
 void setup() {
-  Serial.begin(91024);
+  Serial.begin(9600);
 
   while (!Serial) {
     ;
   }
 
-  //MAC.replace(":", "-");
-  
   setup_wifi();
-  mqtt_reconnect();
 
 #ifdef OTA_enabled
   setup_OTA();
+#endif
+
+#ifdef ShiftRegister_enabled
+  setup_shiftregister();
 #endif
 
 #ifdef HTTPUpdateServer_enabled
   setup_httpUpdater();
 #endif
 
-#ifdef MQTTDiscovery_enabled
-  mqttpub_dscvy("zone1");
-  mqttpub_dscvy("zone2");
-  mqttpub_dscvy("zone3");
-  mqttpub_dscvy("zone4");
-  mqttpub_dscvy("zone5");
-  mqttpub_dscvy("zone6");
-  mqttpub_dscvy("zone7");
-  mqttpub_dscvy("zone8");
+  mqtt_reconnect();
+  client.setCallback(callback);
+
+  char* MQTT_COMPONENT_2 = "binary_sensor";
+  char* MQTT_COMPONENT_5 = "device_trigger";
+  char* MQTT_COMPONENT_11 = "sensor";
+  char* MQTT_COMPONENT_12 = "switch";
+  String zoneID_prefix = "zone"; String zoneID; String stri;
+
+#ifdef mqttDiscovery_enabled
+  for (int i = 1; i <= numberOfZones; i++) {
+    zoneID = zoneID_prefix + i;
+    //strcpy(zoneID, zoneID_prefix);
+    //itoa(i, stri, 10);
+    //strcat(zoneID, stri);
+
+    mqttpub_dscvy((char*)zoneID.c_str(), MQTT_COMPONENT_12);
+    mqttpub_dscvy((char*)zoneID.c_str(), MQTT_COMPONENT_2);
+  }
+
 #endif
-  
+
   delay(500);
   mqttpub_avty("online");
 
@@ -354,5 +675,8 @@ void loop() {
     mqtt_reconnect();
   }
   client.loop();
+
+  Serial.println("nothing...");
+  delay(10000);
 
 }
