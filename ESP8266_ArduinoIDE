@@ -80,10 +80,10 @@ int sr_zone8 = 7;     //RELAY IN8 to sr pin7
 ShiftRegister74HC595<numberofShiftRegisters> shiftregister(dataPin, clockPin, latchPin);
 #endif
 
-WiFiClient espClient;
+WiFiClient espWiFiClient;
 
 //Set MQTT server
-PubSubClient client(espClient);
+PubSubClient client(espWiFiClient);
 int mqtt_port;
 IPAddress mqtt_server;
 
