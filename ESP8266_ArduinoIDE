@@ -16,20 +16,24 @@
 //#define DynamicJSON_enabled          //default: DISabled
 //#define ForgetKnownNetworks_enabled  //default: DISabled // Uncomment to reset WiFi settings & delete known networks
 
-#define numberOfZones 2                //default: 8        // used to determine what to send to MQTT Discovery
+//#define numberOfZones 2                //default: 8      // DELETED, MOVE TO WIFI CONFIG PARAM
 #define numberofShiftRegisters 1       //default: 1        //
 
 /******************************************************************/
 
 //Software Version
-#define SOFTWARE_ID "0.1.0";
+#define SOFTWARE_ID "0.1.2";
 
 /* v0.1.1 Release Requirement Goals:
     [ ] GOAL: Make it work...
 */
 
 /* Version Notes
-    v0.1.0 * (blank)
+    v0.1.2 * Changed numberOfZones determination
+               o Deleted #define numberOfZones
+               o Added WiFi Config Param &specified_numberofzones
+               0 Add global variable int numberOfZones. Set variable to WiFi Param
+           *  Combined initializaiton of bool res and set variable
 
 */
 
@@ -92,6 +96,7 @@ String MAC = String(WiFi.macAddress());
 String mqtt_clientID = MAC;
 //char * MAC = (char*)WiFi.macAddress().c_str();
 //char * mqtt_clientID = MAC;
+int numberOfZones; //New Variable for zones. Value assigend by WiFi Config Param
 
 //Set MQTT topics
 String mqtt_prefix = "home/" + DEVICE_CLASS + "/" + MAC;
@@ -129,12 +134,14 @@ void setup_wifi() {
 #endif
 
   //define custom Captive Portal Parameters
-  WiFiManagerParameter specified_mqtt_server("server", "MQTT Host IP (ex. xxx.xxx.x.xx)", "192.168.1.32", 20, "pattern='\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}'");
+  WiFiManagerParameter specified_numberofzones("numberofZones", "Number of Active Zones", "2",4);
+  //WiFiManagerParameter specified_mqtt_server("server", "MQTT Host IP (ex. xxx.xxx.x.xx)", "192.168.1.32", 20, "pattern='\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}'");
   //WiFiManagerParameter specified_mqtt_port("port", "MQTT Port", "1883", 6);
   //WiFiManagerParameter test_ip_param("test_param", "Test IP param", "", 15, "pattern='\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}'"); // custom input attrs (ip mask)
 
   //add custom Captive Portal Parameters
-  wifiManager.addParameter(&specified_mqtt_server);
+  wifiManager.addParameter(&specified_numberofzones);
+  //wifiManager.addParameter(&specified_mqtt_server);
   //wifiManager.addParameter(&specified_mqtt_port);
   //wifiManager.addParameter(&test_ip_param);
 
@@ -145,15 +152,16 @@ void setup_wifi() {
 
   String AP_NAME = DEVICE_CLASS + " (" + MAC.substring(12) + ")";
 
-  bool res;
-  res = wifiManager.autoConnect((char*)AP_NAME.c_str()); //wifiManager.autoConnect("AP-Name","AP-password")
+  
+  bool res = wifiManager.autoConnect((char*)AP_NAME.c_str()); //wifiManager.autoConnect("AP-Name","AP-password")
 
   if (!res) {
     Serial.println("failed");
   } else {
     Serial.println("connected!");
   }
-
+  
+  numberOfZones = (int)specified_numberofzones.getValue();
   //mqtt_server.fromString(specified_mqtt_server.getValue());
   //mqtt_port = (int)specified_mqtt_port.getValue();
 }
